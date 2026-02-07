@@ -1,33 +1,27 @@
 # at-backend
 
-FastAPI backend with a lightweight Claude Agent (Claude Agent SDK). Designed to be called by a Next.js BFF: Next.js handles UI + auth and proxies agent requests here.
+Long-lived chat with a Claude agent. Frontend connects over WebSocket; one agent per chat, in-memory history.
 
-## Project layout
+## Layout
 
-- **`agent/`** – Agent runner and options. `runner.run_agent()` runs a single turn; options can be extended here (e.g. system prompt, model).
-- **`skills/`** – Custom tools and optional Agent Skill config. Add modules that use `@tool` and `create_sdk_mcp_server`, then wire them in `skills/__init__.py` via `get_agent_options_overrides()` so the agent gets `mcp_servers` and `allowed_tools` without hardcoding in the runner.
-- **`main.py`** – FastAPI app, CORS, and routes (e.g. POST /agent/chat).
-
-Optional later: **`routes/`** (split by domain), **`config/`** (pydantic-settings), **`models/`** (Pydantic schemas shared across routes).
-
-## Setup
-
-```bash
-uv sync
-cp .env.example .env   # add ANTHROPIC_API_KEY if your environment needs it
-```
+- **main.py** — FastAPI app: chat store, session (agent + subscribers), REST + WebSocket.
+- **agent.py** — `AgentSession`: queue-fed agent that streams replies (one per chat).
 
 ## Run
 
 ```bash
+uv sync
 uv run python main.py
 ```
 
-- API: http://localhost:8000  
-- Docs: http://localhost:8000/docs  
+- API: http://localhost:8000
+- WebSocket: ws://localhost:8000/ws
 
-## Agent API
+## Frontend flow
 
-- **POST /agent/chat** — single-turn chat. Body: `{ "message": "..." }`. Returns `{ "response": "..." }`.
+1. **Create a chat** — `POST /api/chats` → get `{ id, title, ... }`.
+2. **Connect** — Open WebSocket to `/ws`.
+3. **Subscribe** — Send `{ "type": "subscribe", "chatId": "<id>" }` → server sends `{ "type": "history", "messages": [...] }`.
+4. **Send a message** — Send `{ "type": "chat", "chatId": "<id>", "content": "..." }` → server broadcasts `user_message`, then `assistant_message` / `tool_use` / `result` / `error` as the agent responds.
 
-From Next.js (BFF or server action), call this endpoint; keep API keys and agent state on the backend. Add Postgres/Redis later for conversation history and job status if needed.
+REST: `GET /api/chats`, `GET /api/chats/{id}`, `GET /api/chats/{id}/messages`, `DELETE /api/chats/{id}`.
