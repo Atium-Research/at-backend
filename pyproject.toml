@@ -10,4 +10,6 @@ dependencies = [
     "claude-agent-sdk>=0.1.0",
     "pygithub>=2.1.1",
     "pyjwt[crypto]>=2.8.0",
+    "nbformat>=5.10.4",
+    "marimo>=0.19.9",
 ]

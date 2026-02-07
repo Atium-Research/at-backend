@@ -83,21 +83,65 @@ Complete these steps in order:
      * Results and interpretation
      * Conclusions
    - Use marimo's @app.cell decorator for each section
-   - Include markdown cells (using mo.md()) for explanations
-   - Make it interactive where appropriate using marimo UI elements
    - Write high-quality, well-commented code
+   - Use marimo UI elements (mo.ui.slider, mo.ui.dropdown, etc.) where they add interactivity
+   - Use mo.vstack(), mo.hstack(), and mo.md() freely for layout and narrative text
+   - Use plain markdown cells to separate and explain each analysis step
+   - CRITICAL: Marimo cell output rules:
+     * The LAST EXPRESSION in a cell is what gets displayed — not a `return` statement
+     * `return` assigns the value to a variable for other cells to consume, but does NOT render it visually
+     * To display output, make it the last bare expression in the cell:
 
-3. EXPORT TO PDF
-   - Run: uvx marimo export pdf research.py -o research.pdf
-   - Note: uvx will automatically install dependencies from the script metadata
+       WRONG (won't render):
+       @app.cell
+       def _(mo):
+           return mo.md("# Title")
 
-4. FIX ANY ERRORS
-   - If any command fails, diagnose the issue
-   - Update the script metadata if dependencies are missing
-   - Retry failed steps
-   - Verify all files were created successfully
+       CORRECT (renders visually):
+       @app.cell
+       def _(mo):
+           mo.md("# Title")
 
-5. COMMIT AND PUSH TO GITHUB
+       CORRECT (displays AND assigns to variable for other cells):
+       @app.cell
+       def _(mo):
+           title = mo.md("# Title")
+           title
+
+     * For cells that ONLY compute data for other cells (no display needed), use `return`:
+       @app.cell
+       def _(np, pl):
+           df = pl.DataFrame({{"x": np.random.randn(100)}})
+           return df,
+
+     * For display-only cells (markdown, charts, tables), do NOT use `return` — just let the expression be the last line
+     * Use `def _(...)` (underscore name) for cells that only display output and don't export variables
+     * Use `def _(mo):` with `mo.md(...)` as the last expression for narrative/explanation cells
+     * Use named functions like `def generate_data(np, pl):` only when other cells need the computed variables, and use `return var1, var2,` syntax for those
+
+3. VALIDATE NOTEBOOK
+   - Run: uvx marimo check research.py
+   - This checks for variable conflicts and structural issues
+   - If errors found, fix them before proceeding
+
+4. TEST EXECUTION
+   - Run: uvx marimo export html research.py -o test.html --sandbox
+   - Check output for "MarimoExceptionRaisedError" messages
+   - Common issues to check:
+     * Missing dependencies (add to script metadata: pyarrow, pandas, etc.)
+     * Variable name conflicts across cells
+     * Invalid f-string format specifiers
+     * Cells without outputs (every cell should return/display something)
+   - Verify the HTML shows all expected outputs (dataframes, plots, text results)
+   - Fix any errors and re-run validation
+
+5. EXPORT TO PDF
+   - Run: uvx marimo export pdf research.py -o research.pdf --sandbox
+   - Note: Only proceed if validation and test execution passed
+   - Verify PDF was created: ls -lh research.pdf
+   - Clean up test files: rm -f test.html
+
+6. COMMIT AND PUSH TO GITHUB
    - Run: git add .
    - Run: git commit -m "Add research project: {topic}"
    - Run: git remote add origin {clone_url}
@@ -111,6 +155,10 @@ IMPORTANT NOTES:
 - Make the notebook publication-ready
 - Use uvx to run marimo commands - it handles dependency isolation automatically
 - Never install dependencies manually - declare them in the script metadata
+- Common dependencies to include: marimo, numpy, polars, pyarrow, pandas, altair, scikit-learn, scipy
+- Ensure all variable names are unique across cells (marimo requirement)
+- Use simple f-string formatting: {{value * 1000:.2f}} not {{value:.2f * 1000:.2f}}
+- Use marimo UI elements and layout functions (mo.vstack, mo.hstack, mo.ui.*) freely for interactivity and organization
 - The GitHub repository has already been created at: {repo_url}
 - At the end, confirm the repository is accessible at: {repo_url}
 
@@ -174,7 +222,7 @@ Begin now and work through each step systematically."""
 
 async def main() -> None:
     topic = "Linear regression analysis"
-    repo_name = "linear-regression-demo"
+    repo_name = "linear-regression-demo-5"
     
     print(f"\n{'='*60}")
     print(f"🔬 Creating Research Project")

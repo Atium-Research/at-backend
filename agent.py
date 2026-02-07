@@ -47,6 +47,7 @@ class AgentSession:
 
     async def _run_query(self) -> None:
         options = ClaudeAgentOptions(
+            model="claude-opus-4-6",
             system_prompt=SYSTEM_PROMPT,
             max_turns=100,
             allowed_tools=[
