@@ -62,8 +62,22 @@ async def lifespan(app: FastAPI):
 
 
 def _cors_origins() -> list[str]:
-    raw = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,https://atiumresearch.com")
+    default = "http://localhost:3000,https://atiumresearch.com,https://www.atiumresearch.com"
+    raw = os.environ.get("ALLOWED_ORIGINS", default).strip()
+    if not raw:
+        raw = default
     return [o.strip() for o in raw.split(",") if o.strip()]
+
+
+def _origin_allowed(origin: str | None) -> bool:
+    """True if origin is in allowed list. Normalizes by stripping trailing slash."""
+    if not origin:
+        return True
+    allowed = _cors_origins()
+    if not allowed:
+        return True
+    normal = origin.strip().rstrip("/")
+    return any(a.strip().rstrip("/") == normal for a in allowed)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -310,8 +324,7 @@ async def get_messages(chat_id: str):
 async def ws(websocket: WebSocket):
     # Allow WebSocket from same origins as REST (browsers send Origin on WS)
     origin = websocket.headers.get("origin") or websocket.headers.get("Origin")
-    allowed = _cors_origins()
-    if origin and allowed and origin not in allowed:
+    if not _origin_allowed(origin):
         await websocket.close(code=1008)  # Policy violation: origin not allowed
         return
     await websocket.accept()
