@@ -36,6 +36,13 @@ To persist chats and messages:
 - API: http://localhost:8000
 - WebSocket: ws://localhost:8000/ws
 
+### Production (e.g. Railway)
+
+- **PORT** — The app uses `PORT` from the environment (Railway sets this). Default 8000 locally.
+- **WebSocket** — Run with a **single process** (e.g. `uv run python main.py` or `uvicorn main:app --host 0.0.0.0 --port $PORT`). Do not use multiple workers; WebSocket connections are stateful.
+- **CORS / origins** — Set `ALLOWED_ORIGINS` to a comma-separated list (e.g. `https://atiumresearch.com`). Used for both REST and WebSocket. Default: `http://localhost:3000,https://atiumresearch.com`.
+- **Frontend** — Use `wss://` (not `ws://`) for the WebSocket URL in production; same host as your API (e.g. `wss://at-backend-production-8139.up.railway.app/ws`). Ensure `NEXT_PUBLIC_API_URL` (or equivalent) is set at **build** time so the client gets the correct backend URL.
+
 ## Frontend flow
 
 1. **Create a chat** — `POST /api/chats` → get `{ id, title, ... }`.

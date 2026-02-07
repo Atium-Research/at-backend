@@ -61,10 +61,15 @@ async def lifespan(app: FastAPI):
                 pass
 
 
+def _cors_origins() -> list[str]:
+    raw = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,https://atiumresearch.com")
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://atiumresearch.com"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -303,6 +308,12 @@ async def get_messages(chat_id: str):
 
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
+    # Allow WebSocket from same origins as REST (browsers send Origin on WS)
+    origin = websocket.headers.get("origin") or websocket.headers.get("Origin")
+    allowed = _cors_origins()
+    if origin and allowed and origin not in allowed:
+        await websocket.close(code=1008)  # Policy violation: origin not allowed
+        return
     await websocket.accept()
     await websocket.send_json(
         {"type": "connected", "message": "Connected to chat server"}
@@ -337,4 +348,5 @@ async def ws(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
