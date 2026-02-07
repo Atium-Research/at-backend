@@ -18,13 +18,14 @@ from claude_agent_sdk import (
     query,
 )
 
-SYSTEM_PROMPT = """You are a helpful AI assistant. Be concise but thorough."""
+DEFAULT_SYSTEM_PROMPT = """You are a helpful AI assistant. Be concise but thorough."""
 
 
 class AgentSession:
     """One long-running query() that reads user messages from a queue and streams events out."""
 
-    def __init__(self) -> None:
+    def __init__(self, system_prompt: str | None = None) -> None:
+        self._system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self._input_queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._output_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
@@ -48,7 +49,7 @@ class AgentSession:
     async def _run_query(self) -> None:
         options = ClaudeAgentOptions(
             model="claude-opus-4-6",
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=self._system_prompt,
             max_turns=100,
             allowed_tools=[
                 "Bash",
