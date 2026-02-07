@@ -2,15 +2,22 @@
 FastAPI app: long-lived chat over WebSocket.
 - REST: create chat, list chats, get messages.
 - WebSocket /ws: subscribe to a chat, send messages, receive streamed replies.
+- Set DATABASE_URL for PostgreSQL persistence; otherwise in-memory.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()  # load .env before reading os.environ
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +25,40 @@ from pydantic import BaseModel
 
 from agent import AgentSession
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    import logging
+    global chat_store
+    logger = logging.getLogger("uvicorn.error")
+    using_postgres = False
+    if os.environ.get("DATABASE_URL"):
+        try:
+            from db import close_pool, get_pool, init_db, PostgresChatStore
+            pool = await get_pool()
+            await init_db(pool)
+            chat_store = PostgresChatStore(pool)
+            using_postgres = True
+            logger.info("Using PostgreSQL for chat persistence")
+        except Exception as e:
+            logger.warning(
+                "Could not connect to PostgreSQL (%s). Using in-memory store. "
+                "Check DATABASE_URL: use postgresql://user:pass@host:5432/dbname (host must resolve, e.g. localhost or your DB host).",
+                e,
+            )
+            chat_store = InMemoryChatStore()
+    try:
+        yield
+    finally:
+        if using_postgres:
+            try:
+                from db import close_pool
+                await close_pool()
+            except Exception:
+                pass
+
+
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -26,8 +66,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# --- Chat store (in-memory) ---
 
 
 @dataclass
@@ -47,32 +85,41 @@ class ChatMessage:
     timestamp: str
 
 
-class ChatStore:
+class ChatStoreProtocol(Protocol):
+    async def create_chat(self, title: str | None = None) -> Chat: ...
+    async def get_chat(self, chat_id: str) -> Chat | None: ...
+    async def get_all_chats(self) -> list[Chat]: ...
+    async def delete_chat(self, chat_id: str) -> bool: ...
+    async def add_message(self, chat_id: str, role: str, content: str) -> ChatMessage: ...
+    async def get_messages(self, chat_id: str) -> list[ChatMessage]: ...
+
+
+class InMemoryChatStore:
+    """In-memory chat store (async interface for compatibility with Postgres store)."""
+
     def __init__(self) -> None:
         self._chats: dict[str, Chat] = {}
         self._messages: dict[str, list[ChatMessage]] = {}
 
-    def create_chat(self, title: str | None = None) -> Chat:
+    async def create_chat(self, title: str | None = None) -> Chat:
         chat_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
-        chat = Chat(
-            id=chat_id, title=title or "New Chat", created_at=now, updated_at=now
-        )
+        chat = Chat(id=chat_id, title=title or "New Chat", created_at=now, updated_at=now)
         self._chats[chat_id] = chat
         self._messages[chat_id] = []
         return chat
 
-    def get_chat(self, chat_id: str) -> Chat | None:
+    async def get_chat(self, chat_id: str) -> Chat | None:
         return self._chats.get(chat_id)
 
-    def get_all_chats(self) -> list[Chat]:
+    async def get_all_chats(self) -> list[Chat]:
         return sorted(self._chats.values(), key=lambda c: c.updated_at, reverse=True)
 
-    def delete_chat(self, chat_id: str) -> bool:
+    async def delete_chat(self, chat_id: str) -> bool:
         self._messages.pop(chat_id, None)
         return self._chats.pop(chat_id, None) is not None
 
-    def add_message(self, chat_id: str, role: str, content: str) -> ChatMessage:
+    async def add_message(self, chat_id: str, role: str, content: str) -> ChatMessage:
         if chat_id not in self._messages:
             raise ValueError(f"Chat {chat_id} not found")
         now = datetime.now(timezone.utc).isoformat()
@@ -91,11 +138,12 @@ class ChatStore:
                 chat.title = content[:50] + ("..." if len(content) > 50 else "")
         return msg
 
-    def get_messages(self, chat_id: str) -> list[ChatMessage]:
+    async def get_messages(self, chat_id: str) -> list[ChatMessage]:
         return self._messages.get(chat_id, [])
 
 
-chat_store = ChatStore()
+# Set in lifespan; use InMemoryChatStore() until then for type hints
+chat_store: ChatStoreProtocol = InMemoryChatStore()
 
 # Friendly status messages when the agent uses a tool (sent over WebSocket before tool_use)
 AGENT_STATUS_BY_TOOL: dict[str, str] = {
@@ -131,7 +179,6 @@ class Session:
         self._is_listening = True
         try:
             async for msg in self._agent.get_output_stream():
-                print(msg)
                 if msg.get("type") == "tool_use":
                     status = _agent_status_message(msg.get("toolName", ""))
                     await self._broadcast(
@@ -141,7 +188,7 @@ class Session:
                             "chatId": self.chat_id,
                         }
                     )
-                await self._broadcast(self._wrap(msg))
+                await self._broadcast(await self._wrap(msg))
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -149,10 +196,10 @@ class Session:
                 {"type": "error", "error": str(e), "chatId": self.chat_id}
             )
 
-    def _wrap(self, msg: dict[str, Any]) -> dict[str, Any]:
+    async def _wrap(self, msg: dict[str, Any]) -> dict[str, Any]:
         out = {**msg, "chatId": self.chat_id}
         if msg.get("type") == "assistant_message":
-            chat_store.add_message(self.chat_id, "assistant", msg.get("content", ""))
+            await chat_store.add_message(self.chat_id, "assistant", msg.get("content", ""))
         return out
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
@@ -165,8 +212,8 @@ class Session:
         for c in dead:
             self._subscribers.discard(c)
 
-    def send_message(self, content: str) -> None:
-        chat_store.add_message(self.chat_id, "user", content)
+    async def send_message(self, content: str) -> None:
+        await chat_store.add_message(self.chat_id, "user", content)
         asyncio.create_task(
             self._broadcast(
                 {"type": "user_message", "content": content, "chatId": self.chat_id}
@@ -210,26 +257,26 @@ def root():
 
 
 @app.get("/api/chats")
-def list_chats():
-    return chat_store.get_all_chats()
+async def list_chats():
+    return await chat_store.get_all_chats()
 
 
 @app.post("/api/chats", status_code=201)
-def create_chat(body: CreateChatBody | None = None):
-    return chat_store.create_chat(title=body.title if body else None)
+async def create_chat(body: CreateChatBody | None = None):
+    return await chat_store.create_chat(title=body.title if body else None)
 
 
 @app.get("/api/chats/{chat_id}")
-def get_chat(chat_id: str):
-    chat = chat_store.get_chat(chat_id)
+async def get_chat(chat_id: str):
+    chat = await chat_store.get_chat(chat_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
     return chat
 
 
 @app.delete("/api/chats/{chat_id}")
-def delete_chat(chat_id: str):
-    if not chat_store.delete_chat(chat_id):
+async def delete_chat(chat_id: str):
+    if not await chat_store.delete_chat(chat_id):
         raise HTTPException(status_code=404, detail="Chat not found")
     if chat_id in sessions:
         sessions[chat_id].close()
@@ -238,8 +285,8 @@ def delete_chat(chat_id: str):
 
 
 @app.get("/api/chats/{chat_id}/messages")
-def get_messages(chat_id: str):
-    return chat_store.get_messages(chat_id)
+async def get_messages(chat_id: str):
+    return await chat_store.get_messages(chat_id)
 
 
 # --- WebSocket ---
@@ -259,17 +306,14 @@ async def ws(websocket: WebSocket):
             if t == "subscribe":
                 session = get_session(chat_id)
                 session.subscribe(websocket)
+                messages = await chat_store.get_messages(chat_id)
                 await websocket.send_json(
-                    {
-                        "type": "history",
-                        "messages": chat_store.get_messages(chat_id),
-                        "chatId": chat_id,
-                    }
+                    {"type": "history", "messages": messages, "chatId": chat_id}
                 )
             elif t == "chat":
                 session = get_session(chat_id)
                 session.subscribe(websocket)
-                session.send_message(data.get("content", ""))
+                await session.send_message(data.get("content", ""))
             else:
                 await websocket.send_json(
                     {"type": "error", "error": "Invalid message format"}
