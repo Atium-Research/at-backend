@@ -7,24 +7,46 @@ Run: uv run python test.py
 import asyncio
 import sys
 from agent import AgentSession
+from github_client import GitHubClient
 
 class ResearchProjectAgent:
     def __init__(self):
         self.agent = AgentSession()
+        self.github = GitHubClient()
     
     async def create_research_project(self, topic: str, repo_name: str = None) -> None:
         """
         Create a complete research project in a marimo notebook.
-        
+
         Args:
             topic: The research topic/question to explore
             repo_name: Optional custom repository name (auto-generated if not provided)
         """
-        
+
         # Auto-generate repo name from topic if not provided
         if repo_name is None:
             repo_name = self._sanitize_repo_name(topic)
-        
+
+        # Create GitHub repository first
+        print(f"🔧 Creating GitHub repository: atium-research/{repo_name}")
+        try:
+            if self.github.repository_exists(repo_name):
+                print(f"⚠️  Repository already exists, using existing repo")
+                repo_url = f"https://github.com/atium-research/{repo_name}"
+            else:
+                repo_url = self.github.create_repository(
+                    repo_name=repo_name,
+                    description=f"Research project: {topic}",
+                    private=False,
+                    auto_init=False,
+                )
+                print(f"✅ Repository created: {repo_url}")
+        except Exception as e:
+            print(f"❌ Failed to create repository: {e}")
+            return
+
+        clone_url = self.github.get_clone_url(repo_name)
+
         prompt = f"""Create a complete research project for the following topic as a marimo notebook:
 
 TOPIC: {topic}
@@ -39,7 +61,20 @@ Complete these steps in order:
 
 2. CREATE MARIMO NOTEBOOK
    - Create a file called 'research.py' as a marimo notebook
-   - At the top of the file, include ALL dependencies needed (numpy, polars, altair, great_tables, etc.)
+   - At the VERY TOP of the file, include inline script metadata (PEP 723) specifying ALL dependencies:
+     ```python
+     # /// script
+     # requires-python = ">=3.11"
+     # dependencies = [
+     #   "marimo",
+     #   "numpy",
+     #   "polars",
+     #   "altair",
+     #   "great_tables",
+     #   # ... add any other packages needed
+     # ]
+     # ///
+     ```
    - Structure the notebook with these sections:
      * Title and introduction explaining the research question
      * Data loading/generation section
@@ -53,31 +88,31 @@ Complete these steps in order:
    - Write high-quality, well-commented code
 
 3. EXPORT TO PDF
-   - Run: marimo export pdf research.py -o research.pdf
+   - Run: uvx marimo export pdf research.py -o research.pdf
+   - Note: uvx will automatically install dependencies from the script metadata
 
 4. FIX ANY ERRORS
    - If any command fails, diagnose the issue
-   - Install missing dependencies as needed
+   - Update the script metadata if dependencies are missing
    - Retry failed steps
    - Verify all files were created successfully
 
-6. COMMIT TO GIT
+5. COMMIT AND PUSH TO GITHUB
    - Run: git add .
    - Run: git commit -m "Add research project: {topic}"
-
-7. GITHUB (atium-research organization)
-   - The repository must live under the atium-research GitHub organization.
-   - Provide clear instructions for creating the repo and pushing:
-     * Create the repository at: https://github.com/atium-research/{repo_name}
-     * Remote: git remote add origin https://github.com/atium-research/{repo_name}.git
-     * Push: git push -u origin main (or master)
+   - Run: git remote add origin {clone_url}
+   - Run: git branch -M main
+   - Run: git push -u origin main
 
 IMPORTANT NOTES:
 - Verify each step completes before moving to next
 - If errors occur, attempt to fix them automatically
 - Include actual data analysis code, not placeholders
 - Make the notebook publication-ready
-- At the end, list the full path to the created repository and the atium-research repo URL (https://github.com/atium-research/<repo_name>).
+- Use uvx to run marimo commands - it handles dependency isolation automatically
+- Never install dependencies manually - declare them in the script metadata
+- The GitHub repository has already been created at: {repo_url}
+- At the end, confirm the repository is accessible at: {repo_url}
 
 Begin now and work through each step systematically."""
 
