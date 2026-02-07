@@ -20,155 +20,148 @@ load_dotenv(Path(__file__).parent / ".env")
 # ---------------------------------------------------------------------------
 
 QUANT_RESEARCH_SYSTEM_PROMPT = """\
-You are a senior quantitative researcher at a systematic equity fund.
-You build rigorous, publication-quality research notebooks that evaluate
-trading signals. You think like a skeptic: every signal is guilty until
-proven innocent. Your research is reproducible, statistically grounded,
-and always accounts for real-world trading frictions.
+You are a quantitative researcher building a research notebook to evaluate
+a trading signal. Your goal is to quickly construct the signal, run a
+backtest, and show the results. Keep it practical — get to the backtest
+as fast as possible.
 
-Core principles you follow:
-- NEVER look ahead: always lag signals appropriately to avoid lookahead bias.
-- ALWAYS cross-section normalize: z-score signals within each date before use.
-- ALWAYS check data quality first: coverage, missing values, outliers.
-- ALWAYS evaluate signal strength BEFORE running a backtest. IC analysis,
-  quintile spreads, and decay analysis come first — they are cheaper and more
-  informative than a full portfolio backtest.
-- ALWAYS include out-of-sample or time-split validation to check for overfitting.
-- ALWAYS consider transaction costs — a signal that requires 200% annual turnover
-  is very different from one at 50%.
-- Present results honestly. If a signal is weak, say so.
+Key rules:
+- Lag signals by at least 1 day to avoid lookahead bias.
+- Cross-section normalize (z-score) signals within each date.
+- Handle missing values by dropping them.
 
-When constructing a research notebook you follow this structure:
-1. Hypothesis & motivation — why should this signal predict returns?
-2. Data loading & quality checks
-3. Signal construction with clear documentation of every parameter choice
-4. Signal properties (distribution, coverage, autocorrelation, turnover)
-5. Predictive power analysis (IC, rank IC, quintile/decile analysis)
-6. Signal decay analysis
-7. Portfolio backtest with proper risk model
-8. Performance attribution and robustness checks
-9. Conclusions & limitations
+Notebook structure:
+1. Brief hypothesis
+2. Data loading & signal construction
+3. Portfolio backtest & performance summary
+4. Cumulative return plot
 """
 
 # ---------------------------------------------------------------------------
 # Prompt building blocks — separated by concern
 # ---------------------------------------------------------------------------
 
-API_REFERENCE = """\
-## Available Packages
+BACKTEST_EXAMPLE = """\
+## Reference Example
 
-### at-data-tools (import as adt) — Data Access Layer
-Always use these dates for all data loading:
-  start = datetime.date(2022, 7, 29)
-  end = datetime.date(2025, 12, 31)
+Follow this pattern exactly. The ONLY thing you should change is the signal
+construction section — adapt it for the requested trading signal. Everything
+else (imports, data loading, alpha conversion, backtest, performance summary)
+stays the same.
 
-Functions (all take start_date, end_date as datetime.date objects, return polars DataFrames):
-- load_stock_prices, load_stock_returns, load_etf_prices
-- load_alphas(start, end, signal_names), load_signals(start, end, signal_names)
-- load_betas, load_factor_loadings, load_factor_covariances
-- load_idio_vol, load_benchmark_weights, load_universe
-- load_calendar, load_stock_forward_returns
-- Schema inspection: get_stock_prices_schema(), get_alphas_schema(), etc.
+If you need to understand a function or schema not shown here, you can inspect
+the at-data-tools or at-research-tools packages at runtime, but do NOT
+exhaustively explore them.
 
-All data has 'date' and 'ticker' columns. Dates are datetime.date objects.
-Use .join() on ['date', 'ticker'] to combine datasets.
-Factor loadings have a 'factor' column. Factor covariances have 'factor_1', 'factor_2', 'covariance'.
+```python
+from at_research_tools.constraints import FullyInvested, LongOnly
+from at_research_tools.backtester import run_backtest
+from at_research_tools.returns import generate_returns_from_weights, generate_cumulative_returns_from_weights
+import at_data_tools as adt
+import datetime as dt
+import polars as pl
 
-### at-research-tools (import as art) — Backtesting & Portfolio Optimization
-- art.run_backtest(alphas, factor_loadings, factor_covariances, idio_vol,
-    benchmark_weights, constraints=[], target_active_risk=0.05)
-  Returns portfolio weights DataFrame.
-- Constraints: from at_research_tools.constraints import FullyInvested, LongOnly
-- Returns: from at_research_tools.returns import generate_returns_from_weights,
-    generate_cumulative_returns_from_weights
+# Define backtest parameters
+start = dt.date(2022, 7, 29)
+end = dt.date(2025, 12, 31)
+target_active_risk = 0.05  # 5% tracking error target
 
-### Exploring the API (only when needed)
-The reference above should be sufficient for most tasks. If you encounter
-unexpected column names, missing fields, or need details not covered above,
-you can inspect packages at runtime:
-- python -c "import at_data_tools as adt; help(adt.<function_name>)"
-- python -c "import at_data_tools as adt; print(adt.get_<dataset>_schema())"
-Do NOT exhaustively explore every function — only look up what you actually need.
-"""
+# Set up constraints
+constraints = [
+    FullyInvested(),  # Weights sum to 1
+    LongOnly()        # No short positions
+]
 
-SIGNAL_EVALUATION_FRAMEWORK = """\
-## Signal Evaluation Framework
+# Load market data
+universe = adt.load_universe(start, end)
+returns = adt.load_stock_returns(start, end)
+idio_vol = adt.load_idio_vol(start, end)
+factor_loadings = adt.load_factor_loadings(start, end)
+factor_covariances = adt.load_factor_covariances(start, end)
+benchmark_weights = adt.load_benchmark_weights(start, end)
 
-Follow these steps IN ORDER. Do not skip to backtesting before completing
-the signal analysis — understanding signal properties first is essential.
+# Combine data
+data = (
+    universe
+    .join(returns, on=['date', 'ticker'], how='left')
+    .join(idio_vol, on=['date', 'ticker'], how='left')
+)
 
-### Step 1: Signal Construction
-- Define the signal clearly. Document every parameter (lookback window, lag, etc.)
-- Apply proper lag to avoid lookahead bias (minimum 1 day; typically 21 days
-  for monthly rebalancing signals)
-- Cross-section normalize: for each date, z-score the signal (subtract mean,
-  divide by std) so that it is comparable across time
-- Handle missing values explicitly (document how many are dropped and why)
+# === SIGNAL CONSTRUCTION (adapt this for the requested signal) ===
+signals = (
+    data
+    .sort('ticker', 'date')
+    .with_columns(
+        pl.col('return')
+        .log1p()
+        .rolling_sum(230)  # ~1 year momentum
+        .shift(21)          # 1-month lag
+        .over('ticker')
+        .alias('momentum')
+    )
+)
 
-### Step 2: Signal Properties
-- **Coverage**: What fraction of the universe has a valid signal on each date?
-  Plot coverage over time. Flag if coverage < 70%.
-- **Distribution**: Show histogram of signal values (after z-scoring). Check for
-  extreme outliers. Consider winsorizing at +/- 3 sigma.
-- **Autocorrelation**: Compute rank autocorrelation of the signal (correlation of
-  today's cross-section ranks with tomorrow's). High autocorrelation (>0.95)
-  means low turnover but potentially stale information.
-- **Sector exposure**: Check whether the signal is just a disguised sector bet
-  by computing the average signal per sector. If so, consider sector-neutralizing.
+# Filter for valid data
+filtered = (
+    signals
+    .filter(
+        pl.col('momentum').is_not_null(),
+        pl.col('idio_vol').is_not_null()
+    )
+)
 
-### Step 3: Predictive Power — Information Coefficient (IC) Analysis
-This is the MOST IMPORTANT step. Compute:
-- **IC (Information Coefficient)**: Pearson correlation between the signal and
-  subsequent forward returns, computed cross-sectionally each period. Report
-  the time-series mean, std, and t-statistic of the IC series.
-- **Rank IC**: Spearman rank correlation (more robust to outliers). Same stats.
-- **IC_IR**: Mean IC / Std IC. This is the signal-level information ratio.
-  Values > 0.05 are interesting; > 0.1 is strong.
-- **Rolling IC**: Plot 12-month rolling average IC to check stability over time.
-  A signal that only works in one regime is less valuable.
-- **IC by sector**: Does the signal predict returns uniformly across sectors
-  or only in certain industries?
+# Standardize scores and convert to alphas
+scores = (
+    filtered
+    .with_columns(
+        pl.col('momentum')
+        .sub(pl.col('momentum').mean())
+        .truediv(pl.col('momentum').std())
+        .over('date')
+        .alias('score')
+    )
+)
 
-### Step 4: Quintile Analysis
-- Each period, sort stocks into 5 groups (quintiles) by signal strength
-- Compute the average forward return for each quintile
-- Key metrics:
-  * **Long-short spread**: Mean return of Q5 (highest signal) minus Q1 (lowest)
-  * **Monotonicity**: Returns should increase (or decrease) smoothly from Q1→Q5.
-    A non-monotonic pattern suggests the signal is noisy.
-  * **Hit rate**: What fraction of periods does the long-short spread have the
-    correct sign?
-- Visualize: bar chart of average returns by quintile, cumulative long-short
-  return over time
+alphas = (
+    scores
+    .with_columns(
+        pl.lit(0.05)
+        .mul('idio_vol')
+        .mul('score')
+        .alias('alpha')
+    )
+)
+# === END SIGNAL CONSTRUCTION ===
 
-### Step 5: Signal Decay
-- Compute IC at different forward horizons (1 day, 5 days, 21 days, 63 days)
-- Plot IC vs. horizon. This shows how quickly the signal's predictive power fades.
-- A signal with fast decay needs frequent rebalancing (higher costs).
-- A signal that peaks at a longer horizon may be more capacity-friendly.
+# Run backtest
+weights = run_backtest(
+    alphas=alphas,
+    factor_loadings=factor_loadings,
+    factor_covariances=factor_covariances,
+    idio_vol=idio_vol,
+    benchmark_weights=benchmark_weights,
+    constraints=constraints,
+    target_active_risk=target_active_risk
+)
 
-### Step 6: Portfolio Backtest
-Only AFTER the above analysis confirms the signal has merit:
-- Use art.run_backtest() with proper risk model inputs
-- Constraints: FullyInvested() and LongOnly() unless otherwise specified
-- Reasonable target_active_risk (0.02-0.05 range)
-- Calculate:
-  * Annualized return, annualized volatility
-  * Sharpe ratio (return / volatility)
-  * Information ratio (active return / tracking error)
-  * Maximum drawdown (peak-to-trough)
-  * Turnover (average daily weight changes, annualized)
-  * Cumulative return plot vs. benchmark
-- Split into in-sample (first 2/3) and out-of-sample (last 1/3) periods.
-  Report metrics for both.
+# Calculate portfolio returns
+forward_returns = adt.load_stock_forward_returns(start, end)
+portfolio_returns = generate_returns_from_weights(weights, forward_returns)
+cumulative_returns = generate_cumulative_returns_from_weights(weights, forward_returns)
 
-### Step 7: Robustness Checks
-- **Parameter sensitivity**: Vary key signal parameters (e.g., lookback ±50%)
-  and show that results don't collapse. A signal that only works for exactly
-  one parameter setting is likely overfit.
-- **Subperiod analysis**: Report metrics for each calendar year separately.
-- **Drawdown analysis**: Identify the worst drawdown period and discuss what
-  market conditions drove it.
+# Analyze performance
+summary = (
+    portfolio_returns
+    .select(
+        pl.col('forward_return').mean().mul(252).alias('mean_return'),
+        pl.col('forward_return').std().mul(pl.lit(252).sqrt()).alias('volatility')
+    )
+    .with_columns(
+        pl.col('mean_return').truediv('volatility').alias('sharpe')
+    )
+)
+print(summary)
+```
 """
 
 NOTEBOOK_FORMAT = """\
@@ -316,13 +309,9 @@ Evaluate the following trading signal with full quantitative rigor:
 
 **SIGNAL:** {topic}
 
-Your goal is to determine whether this signal has genuine predictive power
-for future stock returns, quantify its strength, and assess its practical
-viability as a trading strategy.
+Your goal is to construct this signal, run a backtest, and show the results.
 
-{API_REFERENCE}
-
-{SIGNAL_EVALUATION_FRAMEWORK}
+{BACKTEST_EXAMPLE}
 
 {NOTEBOOK_FORMAT}
 
@@ -333,11 +322,8 @@ viability as a trading strategy.
 Work through these phases in order:
 
 **Phase 1 — Setup**
-Clone and set up the repository. The API Reference above already documents
-the available functions, their signatures, and column schemas — use it as
-your primary reference. Do NOT exhaustively explore the packages upfront.
-Only inspect a function or schema at runtime if you hit a specific issue
-(e.g., unexpected column names or unclear return types).
+Clone and set up the repository. Use the reference example above as your
+template — do NOT exhaustively explore the packages.
 
 **Phase 2 — Build the Notebook**
 Create the marimo notebook following the Signal Evaluation Framework above.
@@ -403,7 +389,7 @@ Begin now. Start with Phase 1."""
 
 async def main() -> None:
     topic = "Short Term Reversal"
-    repo_name = "at-research-reversal-1"
+    repo_name = "at-research-reversal-2"
 
     print(f"\n{'='*60}")
     print(f"Creating Research Project")
