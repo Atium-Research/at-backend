@@ -389,7 +389,7 @@ Begin now. Start with Phase 1."""
 
 async def main() -> None:
     topic = "Short Term Reversal"
-    repo_name = "at-research-reversal-2"
+    repo_name = "at-research-reversal-3"
 
     print(f"\n{'='*60}")
     print(f"Creating Research Project")
