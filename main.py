@@ -29,12 +29,14 @@ from agent import AgentSession
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import logging
+
     global chat_store
     logger = logging.getLogger("uvicorn.error")
     using_postgres = False
     if os.environ.get("DATABASE_URL"):
         try:
             from db import close_pool, get_pool, init_db, PostgresChatStore
+
             pool = await get_pool()
             await init_db(pool)
             chat_store = PostgresChatStore(pool)
@@ -53,6 +55,7 @@ async def lifespan(app: FastAPI):
         if using_postgres:
             try:
                 from db import close_pool
+
                 await close_pool()
             except Exception:
                 pass
@@ -61,7 +64,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "https://atiumresearch.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,7 +93,9 @@ class ChatStoreProtocol(Protocol):
     async def get_chat(self, chat_id: str) -> Chat | None: ...
     async def get_all_chats(self) -> list[Chat]: ...
     async def delete_chat(self, chat_id: str) -> bool: ...
-    async def add_message(self, chat_id: str, role: str, content: str) -> ChatMessage: ...
+    async def add_message(
+        self, chat_id: str, role: str, content: str
+    ) -> ChatMessage: ...
     async def get_messages(self, chat_id: str) -> list[ChatMessage]: ...
 
 
@@ -104,7 +109,9 @@ class InMemoryChatStore:
     async def create_chat(self, title: str | None = None) -> Chat:
         chat_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
-        chat = Chat(id=chat_id, title=title or "New Chat", created_at=now, updated_at=now)
+        chat = Chat(
+            id=chat_id, title=title or "New Chat", created_at=now, updated_at=now
+        )
         self._chats[chat_id] = chat
         self._messages[chat_id] = []
         return chat
@@ -199,7 +206,9 @@ class Session:
     async def _wrap(self, msg: dict[str, Any]) -> dict[str, Any]:
         out = {**msg, "chatId": self.chat_id}
         if msg.get("type") == "assistant_message":
-            await chat_store.add_message(self.chat_id, "assistant", msg.get("content", ""))
+            await chat_store.add_message(
+                self.chat_id, "assistant", msg.get("content", "")
+            )
         return out
 
     async def _broadcast(self, payload: dict[str, Any]) -> None:
