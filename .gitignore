@@ -1,6 +1,7 @@
 # Andrew
 *.pem
 /linear-regression-demo*
+/at-research-reversal*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
