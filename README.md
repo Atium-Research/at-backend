@@ -36,13 +36,6 @@ To persist chats and messages:
 - API: http://localhost:8000
 - WebSocket: ws://localhost:8000/ws
 
-### Production (e.g. Railway)
-
-- **PORT** — The app uses `PORT` from the environment (Railway sets this). Default 8000 locally.
-- **WebSocket** — Run with a **single process** (e.g. `uv run python main.py` or `uvicorn main:app --host 0.0.0.0 --port $PORT`). Do not use multiple workers; WebSocket connections are stateful.
-- **CORS / origins** — Used for both REST and WebSocket. Default includes `http://localhost:3000`, `https://atiumresearch.com`, `https://www.atiumresearch.com`. To override, set `ALLOWED_ORIGINS` (comma-separated, no trailing slashes). In Railway, set it in the service Variables so the production frontend origin is allowed.
-- **Frontend** — Use `wss://` (not `ws://`) for the WebSocket URL in production; same host as your API (e.g. `wss://at-backend-production-8139.up.railway.app/ws`). Ensure `NEXT_PUBLIC_API_URL` (or equivalent) is set at **build** time so the client gets the correct backend URL.
-
 ## Frontend flow
 
 1. **Create a chat** — `POST /api/chats` → get `{ id, title, ... }`.
@@ -51,3 +44,85 @@ To persist chats and messages:
 4. **Send a message** — Send `{ "type": "chat", "chatId": "<id>", "content": "..." }` → server broadcasts `user_message`, then `assistant_message` / `tool_use` / `result` / `error` as the agent responds.
 
 REST: `GET /api/chats`, `GET /api/chats/{id}`, `GET /api/chats/{id}/messages`, `DELETE /api/chats/{id}`.
+
+---
+
+## Research project (New Research Project)
+
+Starts the Research Project Agent (marimo notebook, atium-research GitHub repo) and streams progress over the **same** WebSocket, using the same event types as chat.
+
+### 1. Prepare the chat
+
+- Create a chat: `POST /api/chats` → get `{ id, ... }`.
+- Open WebSocket to `/ws`.
+- Subscribe: send `{ "type": "subscribe", "chatId": "<id>" }` and handle `{ "type": "history", "messages": [...] }`.
+
+### 2. Start research
+
+Send one message:
+
+```json
+{
+  "type": "research",
+  "chatId": "<uuid>",
+  "topic": "Short Term Reversal",
+  "repo_name": "at-research-reversal-1"
+}
+```
+
+- **`chatId`** — Same chat id you subscribed to (required).
+- **`topic`** — Research topic / signal name (required).
+- **`repo_name`** — Optional. If omitted or `null`, the backend derives a name from the topic (e.g. slug).
+
+### 3. Handle events
+
+The server streams events for that **chatId** on the same WebSocket. Handle them like normal chat:
+
+| `type`            | Meaning                    | Payload |
+|-------------------|----------------------------|--------|
+| `assistant_message` | Agent text (streamed)     | `content`, `chatId` |
+| `agent_status`    | Status line                | `message`, `chatId` (e.g. "Running a command", "Reading a file") |
+| `tool_use`        | Agent is using a tool      | `toolName`, `toolId`, `toolInput`, `chatId` |
+| `result`          | Turn finished              | `success`, `chatId`, optional `cost`, `duration_ms` |
+| `error`           | Something failed           | `error`, `chatId` |
+
+Append `assistant_message` to the chat UI; show `agent_status` as a transient status; use `result` to clear loading; show `error` and stop.
+
+### 4. Example (frontend)
+
+```ts
+// After subscribe and storing chatId
+function startResearch(topic: string, repoName?: string | null) {
+  ws.send(JSON.stringify({
+    type: "research",
+    chatId,
+    topic,
+    repo_name: repoName ?? null,
+  }));
+}
+
+// In ws.onmessage (same handler as chat)
+const data = JSON.parse(event.data);
+if (data.type === "assistant_message") appendMessage(data.chatId, "assistant", data.content);
+if (data.type === "agent_status") setStatus(data.message);
+if (data.type === "result") setStatus(null);
+if (data.type === "error") showError(data.error);
+```
+
+### If you get "Invalid message format"
+
+1. **Send exactly one JSON object per WebSocket message**  
+   One `ws.send(JSON.stringify({...}))` per user action. Do not concatenate two JSON objects in one send, and do not send an extra message (e.g. a second subscribe) when you receive `history`.
+
+2. **Use the correct keys**  
+   The research payload must be a single object with:
+   - `type`: string `"research"` (backend accepts any case and trims whitespace).
+   - `chatId`: string (same id you used in subscribe).
+   - `topic`: string (required).
+   - `repo_name`: string or `null` (optional).
+
+3. **Wait for subscribe to complete before sending research**  
+   Send `research` only after you’ve sent `subscribe` and (optionally) handled `history`. If you send `research` in the same tick as `subscribe`, that’s fine; the backend processes one message at a time. Avoid sending a third message (e.g. another subscribe or a heartbeat) immediately after `research` unless it has a known `type`.
+
+4. **Check backend logs**  
+   If the backend doesn’t recognize the message, it logs: `WebSocket unknown message type: ... (keys: ...)`. That shows what `type` and keys were received so you can fix the payload.

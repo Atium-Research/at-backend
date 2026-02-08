@@ -393,6 +393,58 @@ Begin now. Start with Phase 1."""
         elif msg_type == "error":
             print(f"\nError: {msg['error']}")
 
+    # Status messages for tool_use (for WebSocket agent_status events)
+    STATUS_BY_TOOL = {
+        "Bash": "Running a command",
+        "Read": "Reading a file",
+        "Write": "Writing a file",
+        "Edit": "Editing a file",
+    }
+
+    async def run_research_stream(
+        self, topic: str, repo_name: str | None = None
+    ):
+        """
+        Async generator: run research project and yield event dicts for WebSocket.
+        Yields: assistant_message, agent_status, tool_use, result, error (each with appropriate keys).
+        Caller should add chatId and broadcast.
+        """
+        if repo_name is None:
+            repo_name = self._sanitize_repo_name(topic)
+
+        try:
+            if self.github.repository_exists(repo_name):
+                repo_url = f"https://github.com/atium-research/{repo_name}"
+            else:
+                repo_url = self.github.create_repository(
+                    repo_name=repo_name,
+                    description=f"Research project: {topic}",
+                    private=False,
+                    auto_init=False,
+                )
+        except Exception as e:
+            yield {"type": "error", "error": f"Failed to create repository: {e}"}
+            return
+
+        clone_url = self.github.get_clone_url(repo_name)
+        prompt = self._build_research_prompt(
+            topic=topic,
+            repo_name=repo_name,
+            repo_url=repo_url,
+            clone_url=clone_url,
+        )
+        self.agent.send_message(prompt)
+
+        async for msg in self.agent.get_output_stream():
+            if msg is None:
+                break
+            if msg.get("type") == "tool_use":
+                status = self.STATUS_BY_TOOL.get(
+                    msg.get("toolName", ""), f"Using {msg.get('toolName', '')}"
+                )
+                yield {"type": "agent_status", "message": status}
+            yield msg
+
     def _sanitize_repo_name(self, topic: str) -> str:
         """Convert research topic to a valid directory name."""
         name = topic.lower()[:50]

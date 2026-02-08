@@ -61,29 +61,10 @@ async def lifespan(app: FastAPI):
                 pass
 
 
-def _cors_origins() -> list[str]:
-    default = "http://localhost:3000,https://atiumresearch.com,https://www.atiumresearch.com"
-    raw = os.environ.get("ALLOWED_ORIGINS", default).strip()
-    if not raw:
-        raw = default
-    return [o.strip() for o in raw.split(",") if o.strip()]
-
-
-def _origin_allowed(origin: str | None) -> bool:
-    """True if origin is in allowed list. Normalizes by stripping trailing slash."""
-    if not origin:
-        return True
-    allowed = _cors_origins()
-    if not allowed:
-        return True
-    normal = origin.strip().rstrip("/")
-    return any(a.strip().rstrip("/") == normal for a in allowed)
-
-
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins(),
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -240,6 +221,10 @@ class Session:
         for c in dead:
             self._subscribers.discard(c)
 
+    async def broadcast(self, payload: dict[str, Any]) -> None:
+        """Send a message to all subscribers (e.g. research stream events)."""
+        await self._broadcast(payload)
+
     async def send_message(self, content: str) -> None:
         await chat_store.add_message(self.chat_id, "user", content)
         asyncio.create_task(
@@ -322,11 +307,6 @@ async def get_messages(chat_id: str):
 
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
-    # Allow WebSocket from same origins as REST (browsers send Origin on WS)
-    origin = websocket.headers.get("origin") or websocket.headers.get("Origin")
-    if not _origin_allowed(origin):
-        await websocket.close(code=1008)  # Policy violation: origin not allowed
-        return
     await websocket.accept()
     await websocket.send_json(
         {"type": "connected", "message": "Connected to chat server"}
@@ -335,6 +315,8 @@ async def ws(websocket: WebSocket):
         while True:
             data = await websocket.receive_json()
             t = data.get("type")
+            if isinstance(t, str):
+                t = t.strip().lower()
             chat_id = data.get("chatId", "")
             if t == "subscribe":
                 session = get_session(chat_id)
@@ -347,7 +329,35 @@ async def ws(websocket: WebSocket):
                 session = get_session(chat_id)
                 session.subscribe(websocket)
                 await session.send_message(data.get("content", ""))
+            elif t == "research":
+                session = get_session(chat_id)
+                session.subscribe(websocket)
+                topic = data.get("topic") or ""
+                repo_name = data.get("repo_name")
+                if not topic:
+                    await websocket.send_json(
+                        {"type": "error", "error": "Missing topic", "chatId": chat_id}
+                    )
+                else:
+                    from test import ResearchProjectAgent
+                    agent = ResearchProjectAgent()
+                    try:
+                        async for event in agent.run_research_stream(topic, repo_name):
+                            payload = {**event, "chatId": chat_id}
+                            if event.get("type") == "assistant_message":
+                                await chat_store.add_message(
+                                    chat_id, "assistant", event.get("content", "")
+                                )
+                            await session.broadcast(payload)
+                    except Exception as e:
+                        await session.broadcast(
+                            {"type": "error", "error": str(e), "chatId": chat_id}
+                        )
             else:
+                import logging
+                logging.getLogger("uvicorn.error").warning(
+                    "WebSocket unknown message type: %r (keys: %s)", t, list(data.keys()) if isinstance(data, dict) else "not a dict"
+                )
                 await websocket.send_json(
                     {"type": "error", "error": "Invalid message format"}
                 )
@@ -361,5 +371,4 @@ async def ws(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
